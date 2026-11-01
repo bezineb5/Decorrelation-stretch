@@ -22,40 +22,10 @@ lightness, like DStretch's LAB-style mode; channels=(1, 2) in YCbCr =
 chroma only, holding luma).
 """
 
+import argparse
+
 import numpy as np
-
-try:
-    from PIL import Image
-except ImportError:  # matplotlib fallback (PNG/JPEG only)
-    import matplotlib.image as _mpi
-
-    class Image:
-        @staticmethod
-        def open(path):
-            class _I:
-                def __init__(self, arr):
-                    self.arr = arr
-
-                def convert(self, mode):
-                    assert mode == "RGB"
-                    return self
-
-                def __array__(self):
-                    return self.arr
-
-            arr = _mpi.imread(path)
-            if arr.dtype != np.uint8:
-                arr = np.clip(arr * 255, 0, 255).astype(np.uint8)
-            return _I(arr)
-
-        @staticmethod
-        def fromarray(a):
-            class _O:
-                def save(self, path):
-                    _mpi.imsave(path, a)
-
-            return _O()
-
+from PIL import Image, ImageFilter
 
 # --------------------------------------------------------------------------
 # Color space conversions (float arrays in [0, 1] sRGB <-> working space)
@@ -331,13 +301,46 @@ def decorrelation_stretch(
     return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8))
 
 
+def synthetic_scene(size=256, seed=7):
+    """Synthetic, brightness-dominated aerial scene for the self-test."""
+    rng = np.random.default_rng(seed)
+    h = w = size
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    def field(sigma):
+        noise = (rng.random((h, w)) * 255).astype(np.uint8)
+        blur = Image.fromarray(noise, "L").filter(ImageFilter.GaussianBlur(sigma))
+        f = np.asarray(blur, dtype=np.float64)
+        return (f - f.mean()) / f.std()
+
+    f1, f2 = field(25), field(40)
+    S = np.stack(
+        [
+            np.array([8, 18, -12]),  # vegetation
+            np.array([14, 6, -10]),  # soil
+            np.array([-7, -3, 12]),  # water
+            np.array([2, 0, -2]),
+        ]
+    )  # road
+    sel = np.select(
+        [f1 > 0.4, (f1 < -0.6) & (f2 > 0), f2 < -0.5, np.ones((h, w), bool)],
+        [0, 2, 1, 3],
+    ).astype(int)
+    img = (
+        (128 + 40 * field(15) + 12 * f1)[..., None]
+        + S[sel]
+        + rng.normal(0, 3, (h, w, 3))
+    )
+    patch = (xx - 155) ** 2 + (yy - 105) ** 2 < 20**2
+    img[patch] += np.array([9, -3, -6])
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import argparse
-
     p = argparse.ArgumentParser(
         description="Decorrelation stretch (AST06) " "with configurable color space"
     )
@@ -379,38 +382,7 @@ if __name__ == "__main__":
 
     if not a.input:
         # --- self-test on a synthetic, brightness-dominated aerial scene
-        from scipy.ndimage import gaussian_filter
-
-        rng = np.random.default_rng(7)
-        h = w = 256
-        yy, xx = np.mgrid[0:h, 0:w]
-
-        def field(sigma):
-            f = gaussian_filter(rng.random((h, w)), sigma)
-            return (f - f.mean()) / f.std()
-
-        f1, f2 = field(25), field(40)
-        S = np.stack(
-            [
-                np.array([8, 18, -12]),  # vegetation
-                np.array([14, 6, -10]),  # soil
-                np.array([-7, -3, 12]),  # water
-                np.array([2, 0, -2]),
-            ]
-        )  # road
-        sel = np.select(
-            [f1 > 0.4, (f1 < -0.6) & (f2 > 0), f2 < -0.5, np.ones((h, w), bool)],
-            [0, 2, 1, 3],
-        ).astype(int)
-        img = (
-            (128 + 40 * field(15) + 12 * f1)[..., None]
-            + S[sel]
-            + rng.normal(0, 3, (h, w, 3))
-        )
-        patch = (xx - 155) ** 2 + (yy - 105) ** 2 < 20**2
-        img[patch] += np.array([9, -3, -6])
-        img = np.clip(img, 0, 255).astype(np.uint8)
-        src = Image.fromarray(img)
+        src = Image.fromarray(synthetic_scene())
     else:
         src = Image.open(a.input).convert("RGB")
 
