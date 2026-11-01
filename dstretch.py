@@ -29,7 +29,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageOps
 
 # --------------------------------------------------------------------------
 # Color space conversions (float arrays in [0, 1] sRGB <-> working space)
@@ -162,7 +162,11 @@ def decorrelation_stretch(
     workers=None,
 ):
     """
-    img              : HxWx3 uint8 RGB (or path to an image file).
+    img              : HxWx3 uint8 RGB (or path to an image file). 16-bit
+                       arrays are reduced to 8 bit by taking the high byte;
+                       float arrays are scaled by 255 when their max <= 1
+                       (i.e. interpreted as normalized [0, 1]). Grayscale is
+                       replicated to RGB; alpha, if present, is dropped.
     space            : working space -- "srgb", "linear", "lab" or "ycbcr".
     channels         : indices (within the space) to stretch; others pass
                        through unchanged. Default: all. Examples:
@@ -187,22 +191,36 @@ def decorrelation_stretch(
                        linear). All other modes gamut-clip only, so the
                        transform's output is preserved.
     exclude_saturated: drop pure black/white pixels from the statistics.
-    workers           : thread count for the per-chunk pixel loops. Default:
-                        cpu count capped at 8 (the loop saturates memory
-                        bandwidth well before that; more threads measured
-                        < 10% gain); 1 forces single-threaded. The transform
-                        is pointwise, so chunk results are independent and
-                        identical regardless of worker count.
+    workers          : thread count for the per-chunk pixel loops. Default:
+                       cpu count capped at 8 (the loop saturates memory
+                       bandwidth well before that; more threads measured
+                       < 10% gain); 1 forces single-threaded. The transform
+                       is pointwise, so chunk results are independent and
+                       identical regardless of worker count.
     """
     if space not in SPACES:
         raise ValueError(f"unknown space {space!r}; expected one of {SPACES}")
     if isinstance(img, str):
         img = Image.open(img).convert("RGB")
     arr = np.asarray(img)
-    if arr.dtype != np.uint8:
+    if arr.ndim == 2:  # grayscale -> replicated RGB
+        arr = np.repeat(arr[..., None], 3, axis=2)
+    elif arr.shape[-1] == 4:  # RGBA: alpha is not part of the transform
+        arr = arr[..., :3]
+    if arr.dtype == np.uint16:  # 16-bit -> 8 bit, keep the high byte
+        arr = (arr >> 8).astype(np.uint8)
+    elif arr.dtype != np.uint8:
+        arr = arr.astype(np.float64)
+        if arr.size and arr.max() <= 1.0:  # normalized [0, 1] input
+            arr *= 255.0
         arr = np.clip(arr, 0, 255).astype(np.uint8)
     H, W, _ = arr.shape
-    ch = tuple(channels) if channels is not None else (0, 1, 2)
+    if channels is None:
+        ch = (0, 1, 2)
+    elif isinstance(channels, int):
+        ch = (channels,)
+    else:
+        ch = tuple(channels)
     if not ch or any(not (0 <= c < 3) for c in ch) or len(set(ch)) != len(ch):
         raise ValueError(f"invalid channels {channels!r}")
     k = len(ch)
@@ -323,13 +341,16 @@ def decorrelation_stretch(
         else:
             flat = out.reshape(-1, 3)
             lo, hi = flat.min(axis=0), flat.max(axis=0)
-        gain = np.where(
+        # Rescale only channels that have spread; a flat channel keeps its
+        # value (the per-channel loop this replaced did the same).
+        scale = np.where(
             hi > lo,
             np.float32(255.0) / np.maximum(hi - lo, np.float32(1e-6)),
             np.float32(1.0),
         ).astype(np.float32)
-        out -= lo
-        out *= gain
+        offset = np.where(hi > lo, lo, np.float32(0.0)).astype(np.float32)
+        out -= offset
+        out *= scale
         np.clip(out, 0, 255, out=out)
         return Image.fromarray(out.astype(np.uint8))
 
@@ -385,6 +406,29 @@ def _fmt_duration(seconds):
 
 
 _IMG_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+
+
+def _load(path):
+    """Open an image, bake its EXIF orientation into the pixels, and keep
+    the EXIF/ICC metadata for the output."""
+    src = ImageOps.exif_transpose(Image.open(path))
+    meta = {
+        "exif": src.info.get("exif"),
+        "icc_profile": src.info.get("icc_profile"),
+    }
+    return src.convert("RGB"), meta
+
+
+def _save(out, path, meta):
+    """Save, carrying EXIF/ICC through for formats that support them."""
+    ext = os.path.splitext(path)[1].lower()
+    kw = {}
+    if ext in (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"):
+        if meta.get("exif"):
+            kw["exif"] = meta["exif"]
+        if meta.get("icc_profile"):
+            kw["icc_profile"] = meta["icc_profile"]
+    out.save(path, **kw)
 
 
 def _output_path(inp, out_arg):
@@ -499,21 +543,33 @@ if __name__ == "__main__":
     if not a.input:
         # --- self-test on a synthetic, brightness-dominated aerial scene
         src = Image.fromarray(synthetic_scene())
+        meta = {}
     elif len(a.input) == 1:
-        src = Image.open(a.input[0]).convert("RGB")
+        src, meta = _load(a.input[0])
     else:
         # --- batch: images in parallel; each gets its own statistics. JPEG
         # decode/save release the GIL, so threads overlap one image's file
         # I/O with the others' compute -- nearly linear scaling.
         jobs = a.jobs or min(len(a.input), os.cpu_count() or 1)
         inner = max(1, min(8, (os.cpu_count() or 1) // jobs))
+        if (
+            a.output
+            and not os.path.isdir(a.output)
+            and os.path.splitext(a.output)[1].lower() in _IMG_EXTS
+        ):
+            sys.exit(
+                "with multiple inputs, -o/--output must be a directory "
+                f"(a single output file would be overwritten {len(a.input)} times)"
+            )
+        if a.output:
+            os.makedirs(a.output, exist_ok=True)
         t0 = time.perf_counter()
         failed = 0
 
         def run_one(inp):
             try:
                 t1 = time.perf_counter()
-                src = Image.open(inp).convert("RGB")
+                src, meta = _load(inp)
                 dst = _output_path(inp, a.output)
                 out = decorrelation_stretch(
                     src,
@@ -524,7 +580,7 @@ if __name__ == "__main__":
                     clip_fraction=a.clip,
                     workers=inner,
                 )
-                out.save(dst)
+                _save(out, dst, meta)
                 return (
                     inp,
                     dst,
@@ -583,7 +639,7 @@ if __name__ == "__main__":
     cin = np.corrcoef(Din, rowvar=False)
     cout = np.corrcoef(Dout, rowvar=False)
     off = np.triu_indices(len(ch_idx), 1)
-    print(f"space={a.space} channels={list(ch_idx)}")
+    print(f"space={a.space} channels={[int(c) for c in ch_idx]}")
     print("input  channel correlations:", np.round(cin[off], 3))
     print("output channel correlations:", np.round(cout[off], 3))
     print("output std/mean:", np.round(Dout.std(0), 1), np.round(Dout.mean(0), 1))
@@ -599,5 +655,5 @@ if __name__ == "__main__":
         out_path = a.output or "dstretched.png"
         if not os.path.splitext(out_path)[1]:
             out_path += ".png"  # Pillow infers the format from the extension
-    out.save(out_path)
+    _save(out, out_path, meta)
     print("saved ->", out_path)
