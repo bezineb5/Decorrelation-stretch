@@ -342,41 +342,73 @@ def synthetic_scene(size=256, seed=7):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(
-        description="Decorrelation stretch (AST06) " "with configurable color space"
+        description="Decorrelation stretch (ASTER AST06) for RGB images, with a "
+        "configurable working color space. The image is converted to the "
+        "working space, its selected channels are decorrelated and "
+        "contrast-stretched (whitening transform), and the result is "
+        "converted back to sRGB.",
+        epilog=(
+            "Channel indices refer to the working space:\n"
+            "  srgb / linear : 0=R  1=G  2=B\n"
+            "  lab           : 0=L* (lightness)  1=a* (green-red)  2=b* (blue-yellow)\n"
+            "  ycbcr         : 0=Y (luma)  1=Cb (blue chroma)  2=Cr (red chroma)\n"
+            "\n"
+            "Unlisted channels pass through unchanged. The useful case is "
+            "'--channels 1,2' with --space lab or ycbcr: lightness/luma is "
+            "preserved and only the color information is decorrelated and "
+            "stretched, so brightness structure is kept while colors are "
+            "expanded apart (the LAB-style mode of the DStretch plugin; "
+            "useful for faint pigment, vegetation/soil contrasts, ...).\n"
+            "\n"
+            "examples:\n"
+            "  %(prog)s in.jpg out.png --space lab --channels 1,2   "
+            "color stretch, lightness preserved\n"
+            "  %(prog)s in.jpg out.png --space ycbcr --equal-weight"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("input", nargs="?", help="input image (omit: self-test)")
-    p.add_argument("output", nargs="?", help="output image path")
+    p.add_argument(
+        "input",
+        nargs="?",
+        help="input image (omit: self-test on a synthetic aerial scene)",
+    )
+    p.add_argument(
+        "output", nargs="?", help="output image path (default: dstretched.png)"
+    )
     p.add_argument(
         "--space",
         choices=SPACES,
         default="srgb",
-        help="working color space (default: srgb)",
+        help="working color space (default: srgb); see channel indices below",
     )
     p.add_argument(
         "--channels",
         default=None,
-        help="comma-separated channel indices to stretch, "
-        "e.g. '1,2' for LAB a/b or YCbCr chroma only",
+        help="comma-separated channel indices to stretch; unlisted channels "
+        "pass through unchanged (default: all). E.g. '1,2' with --space lab "
+        "stretches a*/b* while preserving lightness; with --space ycbcr it "
+        "stretches chroma while preserving luma; with srgb/linear it "
+        "stretches G/B only",
     )
     p.add_argument(
         "--equal-weight",
         action="store_true",
         help="equal-weight mode (ASTER correlation option): "
-        "output std proportional to input channel std",
+        "output std proportional to input channel std (default: "
+        "equal_variance, all channels stretched to the same target std)",
     )
     p.add_argument(
         "--std",
         type=str,
         default=None,
         help="target std, scalar or comma list (default: "
-        "50 for srgb/linear; 35/20/20 for lab; 50/12/12 "
-        "for ycbcr)",
+        "50 for srgb/linear; 35/20/20 for lab; 50/18/18 for ycbcr)",
     )
     p.add_argument(
         "--clip",
         type=float,
         default=0.004,
-        help="fraction of pixels clipped per channel end",
+        help="fraction of pixels clipped per channel end (default: 0.004)",
     )
     a = p.parse_args()
 
