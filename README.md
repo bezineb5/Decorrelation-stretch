@@ -11,7 +11,9 @@ Decorrelation Stretch*, v2.2, JPL / ASTER AST06.
 > **Independent implementation.** This is an original, independent
 > implementation of a published public-domain algorithm (Taylor 1973;
 > Soha & Schwartz 1978; Alley 1996). It is not affiliated with, derived
-> from, or endorsed by the author of the DStretch ImageJ plugin.
+> from, or endorsed by the author of the DStretch ImageJ plugin. Credit
+> where due: the DStretch plugin (J. Harman) popularized this technique
+> in rock-art documentation.
 
 ## How it works
 
