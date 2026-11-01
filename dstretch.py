@@ -431,7 +431,7 @@ def _save(out, path, meta):
     out.save(path, **kw)
 
 
-def _output_path(inp, out_arg):
+def _output_path(inp, out_arg, is_dir=False):
     """Output path for one batch image: out dir / <stem>.<ext>, or the
     given file path (with an extension appended if missing)."""
     base, ext = os.path.splitext(os.path.basename(inp))
@@ -439,7 +439,7 @@ def _output_path(inp, out_arg):
         ext = ".png"
     if out_arg is None:
         return os.path.join(os.path.dirname(inp), f"{base}-dstretched{ext}")
-    if os.path.isdir(out_arg) or out_arg.endswith(("/", os.sep)):
+    if is_dir or os.path.isdir(out_arg) or out_arg.endswith(("/", os.sep)):
         return os.path.join(out_arg, f"{base}{ext}")
     if not os.path.splitext(out_arg)[1]:
         return out_arg + ext  # Pillow infers the file format from the extension
@@ -561,7 +561,8 @@ if __name__ == "__main__":
                 "with multiple inputs, -o/--output must be a directory "
                 f"(a single output file would be overwritten {len(a.input)} times)"
             )
-        if a.output:
+        out_is_dir = a.output is not None
+        if out_is_dir:
             os.makedirs(a.output, exist_ok=True)
         t0 = time.perf_counter()
         failed = 0
@@ -570,7 +571,7 @@ if __name__ == "__main__":
             try:
                 t1 = time.perf_counter()
                 src, meta = _load(inp)
-                dst = _output_path(inp, a.output)
+                dst = _output_path(inp, a.output, is_dir=out_is_dir)
                 out = decorrelation_stretch(
                     src,
                     space=a.space,

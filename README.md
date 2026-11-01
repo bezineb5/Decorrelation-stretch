@@ -44,6 +44,16 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+## Development
+
+Code is formatted with **black** and tested with **pytest**:
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m black dstretch.py tests/
+.venv/bin/python -m pytest
+```
+
 ## Usage
 
 ```bash
