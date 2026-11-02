@@ -35,7 +35,15 @@ from PIL import Image, ImageFilter, ImageOps
 # Color space conversions (float arrays in [0, 1] sRGB <-> working space)
 # --------------------------------------------------------------------------
 
-SPACES = ("srgb", "linear", "lab", "ycbcr")
+SRGB = "srgb"
+LINEAR = "linear"
+LAB = "lab"
+YCBCR = "ycbcr"
+SPACES = (SRGB, LINEAR, LAB, YCBCR)
+
+MODE_EQUAL_VARIANCE = "equal_variance"
+MODE_EQUAL_WEIGHT = "equal_weight"
+MODES = (MODE_EQUAL_VARIANCE, MODE_EQUAL_WEIGHT)
 
 _RGB2XYZ = np.array(
     [
@@ -81,11 +89,11 @@ def rgb01_to_space(rgb01, space):
     Scales: srgb/linear/ycbcr map to ~[0,255]; lab uses L*2.55 (so L covers
     [0,255]) with a/b in native CIE units (~[-128, 127]).
     """
-    if space == "srgb":
+    if space == SRGB:
         return rgb01 * 255.0
-    if space == "linear":
+    if space == LINEAR:
         return _decode_srgb(np.clip(rgb01, 0.0, 1.0)) * 255.0
-    if space == "lab":
+    if space == LAB:
         lin = _decode_srgb(np.clip(rgb01, 0.0, 1.0))
         xyz = lin @ _RGB2XYZ.T / _WHITE
         fx, fy, fz = (_f_lab(xyz[..., i]) for i in range(3))
@@ -93,7 +101,7 @@ def rgb01_to_space(rgb01, space):
         a = 500.0 * (fx - fy)
         b = 200.0 * (fy - fz)
         return np.stack([L * 2.55, a, b], axis=-1)
-    if space == "ycbcr":
+    if space == YCBCR:
         r, g, b = (rgb01[..., i] * 255.0 for i in range(3))  # BT.601 full-range
         y = 0.299 * r + 0.587 * g + 0.114 * b
         cb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b
@@ -109,11 +117,11 @@ def space_to_rgb01(vals, space):
     handled later by the adaptive percentile remap. LAB/YCbCr results are
     clipped, because out-of-gamut colors have no sRGB equivalent.
     """
-    if space == "srgb":
+    if space == SRGB:
         return vals / 255.0
-    if space == "linear":
+    if space == LINEAR:
         return _encode_srgb(np.maximum(vals, 0.0) / 255.0)
-    if space == "lab":
+    if space == LAB:
         L, a, b = vals[..., 0] / 2.55, vals[..., 1], vals[..., 2]
         fy = (L + 16.0) / 116.0
         fx = fy + a / 500.0
@@ -123,7 +131,7 @@ def space_to_rgb01(vals, space):
         )
         lin = xyz @ _XYZ2RGB.T
         return np.clip(_encode_srgb(lin), 0.0, 1.0)
-    if space == "ycbcr":
+    if space == YCBCR:
         y, cb, cr = vals[..., 0], vals[..., 1] - 128.0, vals[..., 2] - 128.0
         r = y + 1.402 * cr
         g = y - 0.344136 * cb - 0.714136 * cr
@@ -150,9 +158,9 @@ def _stats_filter(X, exclude_saturated, margin):
 
 def decorrelation_stretch(
     img,
-    space="srgb",
+    space=SRGB,
     channels=None,
-    mode="equal_variance",
+    mode=MODE_EQUAL_VARIANCE,
     target_std=None,
     target_mean="input",
     clip_fraction=0.004,
@@ -259,20 +267,20 @@ def decorrelation_stretch(
     #     to each channel's input std (equal weighting per channel), rms
     #     output std = target.
     _STD_DEFAULTS = {
-        "srgb": (50.0, 50.0, 50.0),
-        "linear": (50.0, 50.0, 50.0),
-        "lab": (35.0, 20.0, 20.0),
-        "ycbcr": (50.0, 18.0, 18.0),
+        SRGB: (50.0, 50.0, 50.0),
+        LINEAR: (50.0, 50.0, 50.0),
+        LAB: (35.0, 20.0, 20.0),
+        YCBCR: (50.0, 18.0, 18.0),
     }
     if target_std is None:
         s_target = np.array([_STD_DEFAULTS[space][c] for c in ch], dtype=np.float64)
     else:
         s_target = np.broadcast_to(np.asarray(target_std, np.float64), (k,))
-    if mode == "equal_variance":
+    if mode == MODE_EQUAL_VARIANCE:
         lam, R = np.linalg.eigh(cov)
         lam = np.maximum(lam, 1e-12)
         T = R @ np.diag(s_target / np.sqrt(lam)) @ R.T
-    elif mode == "equal_weight":
+    elif mode == MODE_EQUAL_WEIGHT:
         corr = cov / np.outer(d_std, d_std)
         lam, R = np.linalg.eigh(corr)
         lam = np.maximum(lam, 1e-12)
@@ -280,7 +288,7 @@ def decorrelation_stretch(
         C = R @ np.diag(s_target / (rms * np.sqrt(lam))) @ R.T  # z-space
         T = d_std[:, None] * C / d_std[None, :]  # D C D^-1
     else:
-        raise ValueError(f"invalid mode {mode!r}")
+        raise ValueError(f"invalid mode {mode!r}; expected one of {MODES}")
     T = T.astype(np.float32)
 
     if isinstance(target_mean, str):
@@ -301,7 +309,7 @@ def decorrelation_stretch(
     # (partial channels, non-display spaces) clip and write uint8 per chunk:
     # the output buffer stays 4x smaller, which matters once the image
     # outgrows memory bandwidth.
-    remap_needed = k == 3 and space in ("srgb", "linear")
+    remap_needed = k == 3 and space in (SRGB, LINEAR)
     out = np.empty((H, W, 3), dtype=np.float32 if remap_needed else np.uint8)
     chunk = 256
     spans = [(i, min(i + chunk, H)) for i in range(0, H, chunk)]
@@ -491,7 +499,7 @@ if __name__ == "__main__":
     p.add_argument(
         "--space",
         choices=SPACES,
-        default="srgb",
+        default=SRGB,
         help="working color space (default: srgb); see channel indices below",
     )
     p.add_argument(
@@ -576,7 +584,7 @@ if __name__ == "__main__":
                     src,
                     space=a.space,
                     channels=ch,
-                    mode="equal_weight" if a.equal_weight else "equal_variance",
+                    mode=MODE_EQUAL_WEIGHT if a.equal_weight else MODE_EQUAL_VARIANCE,
                     target_std=std,
                     clip_fraction=a.clip,
                     workers=inner,
@@ -616,7 +624,7 @@ if __name__ == "__main__":
         src,
         space=a.space,
         channels=ch,
-        mode="equal_weight" if a.equal_weight else "equal_variance",
+        mode=MODE_EQUAL_WEIGHT if a.equal_weight else MODE_EQUAL_VARIANCE,
         target_std=std,
         clip_fraction=a.clip,
     )
